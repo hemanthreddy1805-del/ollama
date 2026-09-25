@@ -5,7 +5,7 @@ response = ollama.chat(
     messages=[
         {
             "role": "system",
-            "content": "You are a Python teacher. Explain concepts in very simple language and always give a small example."
+            "content": "expain me what is azure data factor and azure data bricks and sql"
         },
         {
             "role": "user",
