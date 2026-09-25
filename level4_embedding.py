@@ -2,7 +2,7 @@ import ollama
 
 response = ollama.embed(
     model="nomic-embed-text",
-    input="Python is a programming language"
+    input="my name is hemanth reddy am learning the gen ai right now"
 )
 
 embedding = response["embeddings"][0]
