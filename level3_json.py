@@ -13,13 +13,15 @@ Return the answer ONLY as valid JSON.
 
 The JSON must contain:
 - name
-- role
+-experience
+- technology
 - skill
+-goal
 """
         },
         {
             "role": "user",
-            "content": "My name is Hemanth. I am learning Generative AI and Python."
+            "content": "My name is Hemanth. i have 3 years of experience in software field.i know python and sql .and i want to became an gen ai engineer"
         }
     ]
 )
