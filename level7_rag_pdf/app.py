@@ -1,4 +1,6 @@
 import os
+import ast
+import operator
 import pandas as pd
 from pypdf import PdfReader
 from docx import Document
@@ -175,10 +177,11 @@ def create_vector_database(chunks):
         path="./chroma_db"
     )
 
-    # Delete old collection if it exists
     try:
 
-        client.delete_collection("company_documents")
+        client.delete_collection(
+            "company_documents"
+        )
 
     except Exception:
 
@@ -219,18 +222,140 @@ def create_vector_database(chunks):
 
 
 # ==================================================
-# 9. ASK QUESTION
+# 9. SAFE CALCULATOR
 # ==================================================
 
-def ask_question(collection, question):
+def calculate(expression):
+    """
+    Calculator tool.
 
-    # Create embedding for user question
+    Supports:
+    +  -  *  /  %  **
+    parentheses
+    """
+
+    allowed_operators = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Mod: operator.mod,
+        ast.Pow: operator.pow,
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos
+    }
+
+    def evaluate(node):
+
+        # Number
+        if isinstance(node, ast.Constant):
+
+            if isinstance(node.value, (int, float)):
+
+                return node.value
+
+            raise ValueError(
+                "Only numbers are allowed."
+            )
+
+        # Binary operation
+        elif isinstance(node, ast.BinOp):
+
+            left = evaluate(node.left)
+            right = evaluate(node.right)
+
+            operation = allowed_operators.get(
+                type(node.op)
+            )
+
+            if operation is None:
+
+                raise ValueError(
+                    "Operator not allowed."
+                )
+
+            return operation(left, right)
+
+        # Positive / negative number
+        elif isinstance(node, ast.UnaryOp):
+
+            value = evaluate(node.operand)
+
+            operation = allowed_operators.get(
+                type(node.op)
+            )
+
+            if operation is None:
+
+                raise ValueError(
+                    "Operator not allowed."
+                )
+
+            return operation(value)
+
+        else:
+
+            raise ValueError(
+                "Invalid mathematical expression."
+            )
+
+    try:
+
+        tree = ast.parse(
+            expression,
+            mode="eval"
+        )
+
+        result = evaluate(tree.body)
+
+        return str(result)
+
+    except Exception as e:
+
+        return f"Calculation error: {str(e)}"
+
+
+# ==================================================
+# 10. CALCULATOR TOOL DEFINITION
+# ==================================================
+
+calculator_tool = {
+    "type": "function",
+    "function": {
+        "name": "calculate",
+        "description": (
+            "Use this tool when a mathematical "
+            "calculation is required. "
+            "Examples: 25% of 80000, "
+            "100 + 200, 500 * 20, "
+            "(1000 + 500) / 2."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": (
+                        "Mathematical expression "
+                        "to calculate."
+                    )
+                }
+            },
+            "required": ["expression"]
+        }
+    }
+}
+
+
+# ==================================================
+# 11. RAG SEARCH
+# ==================================================
+
+def search_documents(collection, question):
 
     question_embedding = create_embedding(
         question
     )
-
-    # Search vector database
 
     results = collection.query(
 
@@ -244,9 +369,6 @@ def ask_question(collection, question):
     documents = results["documents"][0]
 
     metadatas = results["metadatas"][0]
-
-
-    # Combine retrieved information
 
     context_parts = []
 
@@ -266,29 +388,70 @@ def ask_question(collection, question):
         context_parts
     )
 
+    return context
 
-    # ==================================================
-    # PROMPT FOR LLM
-    # ==================================================
 
-    prompt = f"""
+# ==================================================
+# 12. ASK QUESTION WITH TOOL CALLING
+# ==================================================
+
+def ask_question(collection, question):
+
+    # ------------------------------------------------
+    # First perform RAG search
+    # ------------------------------------------------
+
+    context = search_documents(
+        collection,
+        question
+    )
+
+    # ------------------------------------------------
+    # System instruction
+    # ------------------------------------------------
+
+    system_prompt = """
 You are a company knowledge assistant.
 
-Answer the user's question using ONLY the
-information provided in the context.
+You have access to a calculator tool.
 
-The context can come from PDF, DOCX, Excel,
-or CSV files.
+Rules:
 
-If the answer cannot be found in the context,
-say:
+1. Use the provided document context to answer
+   questions about company documents.
 
-"I could not find this information in the
-provided documents."
+2. If the user asks for a mathematical calculation,
+   use the calculator tool.
 
-Do not invent information.
+3. Never calculate complicated mathematical
+   expressions yourself when the calculator tool
+   can be used.
 
-Always mention the source file when possible.
+4. Do not invent information.
+
+5. If the information cannot be found in the
+   documents, clearly say so.
+
+6. Always mention the source file when possible.
+
+7. Give the final answer in a simple and clear way.
+"""
+
+    # ------------------------------------------------
+    # Initial messages
+    # ------------------------------------------------
+
+    messages = [
+
+        {
+            "role": "system",
+            "content": system_prompt
+        },
+
+        {
+            "role": "user",
+            "content": f"""
+Context from company documents:
 
 ---------------- CONTEXT ----------------
 
@@ -297,28 +460,96 @@ Always mention the source file when possible.
 ---------------- QUESTION ----------------
 
 {question}
-
----------------- ANSWER ----------------
 """
+        }
+    ]
 
-
-    # ==================================================
-    # CALL OLLAMA
-    # ==================================================
+    # ------------------------------------------------
+    # First LLM call
+    # ------------------------------------------------
 
     response = ollama.chat(
 
         model=LLM_MODEL,
 
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
+        messages=messages,
+
+        tools=[
+            calculator_tool
         ]
     )
 
-    return response["message"]["content"]
+    # ------------------------------------------------
+    # Check whether LLM requested a tool
+    # ------------------------------------------------
+
+    if response.message.tool_calls:
+
+        # Add LLM response to conversation
+        messages.append(response.message)
+
+        # Process every tool call
+        for tool_call in response.message.tool_calls:
+
+            if tool_call.function.name == "calculate":
+
+                expression = (
+                    tool_call.function.arguments[
+                        "expression"
+                    ]
+                )
+
+                print(
+                    f"\n[Calculator Tool Called]"
+                )
+
+                print(
+                    f"Expression: {expression}"
+                )
+
+                result = calculate(
+                    expression
+                )
+
+                print(
+                    f"Result: {result}"
+                )
+
+                # Send calculator result
+                # back to the LLM
+
+                messages.append({
+
+                    "role": "tool",
+
+                    "content": (
+                        f"Calculator result: "
+                        f"{result}"
+                    )
+                })
+
+        # ------------------------------------------------
+        # Ask LLM for final answer
+        # ------------------------------------------------
+
+        final_response = ollama.chat(
+
+            model=LLM_MODEL,
+
+            messages=messages,
+
+            tools=[
+                calculator_tool
+            ]
+        )
+
+        return final_response.message.content
+
+    # ------------------------------------------------
+    # No tool required
+    # ------------------------------------------------
+
+    return response.message.content
 
 
 # ==================================================
@@ -326,11 +557,13 @@ Always mention the source file when possible.
 # ==================================================
 
 print("\n====================================")
-print("MULTI-FORMAT RAG SYSTEM")
+print("RAG + CALCULATOR TOOL")
 print("====================================")
 
 
+# --------------------------------------------------
 # Load files
+# --------------------------------------------------
 
 documents = load_all_files()
 
@@ -339,7 +572,9 @@ print(
 )
 
 
+# --------------------------------------------------
 # Create chunks
+# --------------------------------------------------
 
 chunks = create_chunks(documents)
 
@@ -348,7 +583,9 @@ print(
 )
 
 
+# --------------------------------------------------
 # Create vector database
+# --------------------------------------------------
 
 collection = create_vector_database(
     chunks
@@ -357,6 +594,7 @@ collection = create_vector_database(
 
 print("\n====================================")
 print("RAG SYSTEM READY")
+print("CALCULATOR TOOL READY")
 print("====================================")
 
 
@@ -367,7 +605,8 @@ print("====================================")
 while True:
 
     question = input(
-        "\nAsk your question (type 'exit' to stop): "
+        "\nAsk your question "
+        "(type 'exit' to stop): "
     )
 
     if question.lower() == "exit":
@@ -376,12 +615,10 @@ while True:
 
         break
 
-
     answer = ask_question(
         collection,
         question
     )
-
 
     print("\n====================================")
     print("ANSWER")
