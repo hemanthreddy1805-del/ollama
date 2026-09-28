@@ -1,0 +1,9 @@
+ollama
+chromadb
+python-docx
+pypdf
+pandas
+openpyxl
+python-dotenv
+openai
+langchain-text-splitter
